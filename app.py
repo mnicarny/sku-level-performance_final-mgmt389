@@ -4,7 +4,6 @@
 # pandas
 # numpy
 # plotly
-# openpyxl
 
 import os
 from pathlib import Path
@@ -36,10 +35,7 @@ APP_SUBTITLE = (
     "logistics, supplier, and quality performance."
 )
 
-POSSIBLE_FILES = [
-    "Supply_Chain_Data.xlsx",
-    "Supply_Chain_Data.csv"
-]
+DATASET_FILE = "supply_chain_data.csv"
 
 REQUIRED_COLUMNS = [
     "sku",
@@ -89,10 +85,6 @@ FILTER_COLUMNS = {
 # ============================================================
 
 def normalize_column_name(column: str) -> str:
-    """
-    Normalize column names by stripping whitespace, converting to lowercase,
-    and replacing spaces with underscores.
-    """
     return (
         str(column)
         .strip()
@@ -104,49 +96,31 @@ def normalize_column_name(column: str) -> str:
 
 
 def export_csv(df: pd.DataFrame) -> bytes:
-    """
-    Convert a dataframe to CSV bytes for Streamlit download buttons.
-    """
     return df.to_csv(index=False).encode("utf-8")
 
 
 def find_dataset_file() -> Path | None:
-    """
-    Search for the expected dataset file in the same directory as app.py.
-    The app supports either Excel or CSV input.
-    """
     current_dir = Path(__file__).parent if "__file__" in globals() else Path.cwd()
+    dataset_path = current_dir / DATASET_FILE
 
-    for file_name in POSSIBLE_FILES:
-        file_path = current_dir / file_name
-        if file_path.exists():
-            return file_path
+    if dataset_path.exists():
+        return dataset_path
 
     return None
 
 
 @st.cache_data(show_spinner=False)
 def load_data() -> Tuple[pd.DataFrame | None, str | None]:
-    """
-    Load the dataset from the same folder as app.py.
-    Excel and CSV formats are supported.
-    """
     dataset_path = find_dataset_file()
 
     if dataset_path is None:
         return None, (
-            "Dataset file not found. Please place either "
-            "'Supply_Chain_Data.xlsx' or 'Supply_Chain_Data.csv' "
+            "Dataset file not found. Please place 'supply_chain_data.csv' "
             "in the same folder as app.py."
         )
 
     try:
-        if dataset_path.suffix.lower() == ".xlsx":
-            df = pd.read_excel(dataset_path, engine="openpyxl")
-        elif dataset_path.suffix.lower() == ".csv":
-            df = pd.read_csv(dataset_path)
-        else:
-            return None, "Unsupported file format. Please use .xlsx or .csv."
+        df = pd.read_csv(dataset_path)
 
         if df.empty:
             return None, "The dataset loaded successfully, but it is empty."
@@ -158,15 +132,10 @@ def load_data() -> Tuple[pd.DataFrame | None, str | None]:
 
 
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize columns, consolidate aliases, remove duplicate rows,
-    and convert relevant columns to numeric safely.
-    """
     df = df.copy()
 
     df.columns = [normalize_column_name(col) for col in df.columns]
 
-    # Consolidate lead_time and lead_times aliases into one consistent field.
     if "lead_time" not in df.columns and "lead_times" in df.columns:
         df["lead_time"] = df["lead_times"]
 
@@ -174,13 +143,11 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         df["lead_time"] = df["lead_time"].combine_first(df["lead_times"])
         df = df.drop(columns=["lead_times"])
 
-    # Remove exact duplicate rows.
     duplicate_count = df.duplicated().sum()
     if duplicate_count > 0:
         st.warning(f"{duplicate_count:,} duplicate row(s) were found and removed.")
         df = df.drop_duplicates()
 
-    # Convert relevant numeric columns safely.
     for col in NUMERIC_COLUMNS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -189,10 +156,6 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def validate_columns(df: pd.DataFrame) -> bool:
-    """
-    Validate required fields before analysis.
-    If fields are missing, stop downstream processing and show a clear message.
-    """
     missing_columns = [col for col in REQUIRED_COLUMNS if col not in df.columns]
 
     if missing_columns:
@@ -210,72 +173,51 @@ def validate_columns(df: pd.DataFrame) -> bool:
 
 
 def create_risk_flags(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create rule-based inventory, lead time, quality, and cost burden risk flags.
-    """
     df = df.copy()
 
-    sales_col = "number_of_products_sold"
-    stock_col = "stock_levels"
-    lead_col = "lead_time"
-    defect_col = "defect_rates"
-    shipping_col = "shipping_costs"
-    manufacturing_col = "manufacturing_costs"
+    stock_75 = df["stock_levels"].quantile(0.75)
+    stock_25 = df["stock_levels"].quantile(0.25)
 
-    stock_75 = df[stock_col].quantile(0.75) if stock_col in df.columns else np.nan
-    stock_25 = df[stock_col].quantile(0.25) if stock_col in df.columns else np.nan
+    sales_75 = df["number_of_products_sold"].quantile(0.75)
+    sales_25 = df["number_of_products_sold"].quantile(0.25)
 
-    sales_75 = df[sales_col].quantile(0.75) if sales_col in df.columns else np.nan
-    sales_25 = df[sales_col].quantile(0.25) if sales_col in df.columns else np.nan
+    lead_avg = df["lead_time"].mean()
+    lead_75 = df["lead_time"].quantile(0.75)
 
-    lead_avg = df[lead_col].mean() if lead_col in df.columns else np.nan
-    lead_75 = df[lead_col].quantile(0.75) if lead_col in df.columns else np.nan
+    defect_75 = df["defect_rates"].quantile(0.75)
 
-    defect_75 = df[defect_col].quantile(0.75) if defect_col in df.columns else np.nan
-
-    shipping_75 = (
-        df[shipping_col].quantile(0.75)
-        if shipping_col in df.columns
-        else np.nan
-    )
+    shipping_75 = df["shipping_costs"].quantile(0.75)
 
     manufacturing_75 = (
-        df[manufacturing_col].quantile(0.75)
-        if manufacturing_col in df.columns
+        df["manufacturing_costs"].quantile(0.75)
+        if "manufacturing_costs" in df.columns
         else np.nan
     )
 
-    # Inventory risk: high stock with low sales may indicate overstock.
     df["overstock_risk_flag"] = (
-        (df[stock_col] >= stock_75)
-        & (df[sales_col] <= sales_25)
+        (df["stock_levels"] >= stock_75)
+        & (df["number_of_products_sold"] <= sales_25)
     )
 
-    # Inventory risk: low stock with high sales may indicate stockout exposure.
     df["stockout_risk_flag"] = (
-        (df[stock_col] <= stock_25)
-        & (df[sales_col] >= sales_75)
+        (df["stock_levels"] <= stock_25)
+        & (df["number_of_products_sold"] >= sales_75)
     )
 
-    # Lead time risk: above average or above 75th percentile indicates slower replenishment.
     df["long_lead_time_risk_flag"] = (
-        (df[lead_col] > lead_avg)
-        | (df[lead_col] >= lead_75)
+        (df["lead_time"] > lead_avg)
+        | (df["lead_time"] >= lead_75)
     )
 
-    # Quality risk: high defect rate relative to the dataset.
-    df["high_defect_risk_flag"] = df[defect_col] >= defect_75
+    df["high_defect_risk_flag"] = df["defect_rates"] >= defect_75
 
-    # Cost burden risk: shipping cost above 75th percentile.
-    if shipping_col in df.columns:
-        df["shipping_cost_burden_risk_flag"] = df[shipping_col] >= shipping_75
-    else:
-        df["shipping_cost_burden_risk_flag"] = False
+    df["shipping_cost_burden_risk_flag"] = (
+        df["shipping_costs"] >= shipping_75
+    )
 
-    # Cost burden risk: manufacturing cost above 75th percentile.
-    if manufacturing_col in df.columns:
+    if "manufacturing_costs" in df.columns:
         df["manufacturing_cost_burden_risk_flag"] = (
-            df[manufacturing_col] >= manufacturing_75
+            df["manufacturing_costs"] >= manufacturing_75
         )
     else:
         df["manufacturing_cost_burden_risk_flag"] = False
@@ -315,27 +257,23 @@ def create_risk_flags(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def create_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create analytical features used in the dashboard.
-    Calculations avoid fabricating missing values and use NaN where needed.
-    """
     df = df.copy()
 
-    # Revenue per unit sold measures how much revenue is generated for each sold unit.
+    # Revenue per unit sold shows how much revenue is generated per sold unit.
     df["revenue_per_unit_sold"] = np.where(
         df["number_of_products_sold"] > 0,
         df["revenue_generated"] / df["number_of_products_sold"],
         np.nan
     )
 
-    # Stock-to-sales ratio compares current inventory to sales volume.
+    # Stock-to-sales ratio compares inventory levels against sales volume.
     df["stock_to_sales_ratio"] = np.where(
         df["number_of_products_sold"] > 0,
         df["stock_levels"] / df["number_of_products_sold"],
         np.nan
     )
 
-    # Shipping cost per unit estimates logistics burden per ordered or sold unit.
+    # Shipping cost per unit estimates logistics cost burden per unit.
     if "order_quantities" in df.columns:
         df["shipping_cost_per_unit"] = np.where(
             df["order_quantities"] > 0,
@@ -349,7 +287,7 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
             np.nan
         )
 
-    # Manufacturing cost per unit estimates production cost burden per production unit.
+    # Manufacturing cost per unit estimates production cost burden per unit.
     if "manufacturing_costs" in df.columns and "production_volumes" in df.columns:
         df["manufacturing_cost_per_unit"] = np.where(
             df["production_volumes"] > 0,
@@ -404,24 +342,21 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
             return "Moderate Risk"
         return "Low Risk"
 
-    df["overall_operational_risk"] = df["risk_flag_count"].apply(overall_risk_category)
+    df["overall_operational_risk"] = df["risk_flag_count"].apply(
+        overall_risk_category
+    )
 
     return df
 
 
 def compute_kpis(df: pd.DataFrame) -> Dict[str, float]:
-    """
-    Compute dashboard KPI values.
-    """
     total_revenue = df["revenue_generated"].sum(skipna=True)
     total_skus = df["sku"].nunique()
     avg_revenue_per_sku = total_revenue / total_skus if total_skus else np.nan
 
-    high_risk_count = (
-        df[df["overall_operational_risk"] == "High Risk"]["sku"].nunique()
-        if "overall_operational_risk" in df.columns
-        else 0
-    )
+    high_risk_count = df[
+        df["overall_operational_risk"] == "High Risk"
+    ]["sku"].nunique()
 
     return {
         "total_revenue": total_revenue,
@@ -436,40 +371,24 @@ def compute_kpis(df: pd.DataFrame) -> Dict[str, float]:
 
 
 def format_currency(value: float) -> str:
-    """
-    Format numeric values as currency.
-    """
     if pd.isna(value):
         return "N/A"
     return f"${value:,.2f}"
 
 
 def format_number(value: float) -> str:
-    """
-    Format numeric values as general numbers.
-    """
     if pd.isna(value):
         return "N/A"
     return f"{value:,.2f}"
 
 
 def format_integer(value: float) -> str:
-    """
-    Format numeric values as integer-like values.
-    """
     if pd.isna(value):
         return "N/A"
     return f"{int(value):,}"
 
 
-def add_sidebar_filter(
-    df: pd.DataFrame,
-    label: str,
-    column: str
-) -> List[str]:
-    """
-    Build a dynamic sidebar multiselect filter with an All option.
-    """
+def add_sidebar_filter(df: pd.DataFrame, label: str, column: str) -> List[str]:
     if column not in df.columns:
         return ["All"]
 
@@ -492,9 +411,6 @@ def add_sidebar_filter(
 
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply all selected sidebar filters to the dataset.
-    """
     filtered_df = df.copy()
 
     st.sidebar.header("Dashboard Filters")
@@ -517,9 +433,6 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def create_supplier_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create supplier-level summary table.
-    """
     summary = (
         df.groupby("supplier_name", dropna=False)
         .agg(
@@ -541,9 +454,6 @@ def create_supplier_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_charts(df: pd.DataFrame) -> None:
-    """
-    Build required Plotly charts in a clean two-column dashboard layout.
-    """
     st.subheader("Performance Visualizations")
 
     col1, col2 = st.columns(2)
@@ -667,9 +577,7 @@ def build_charts(df: pd.DataFrame) -> None:
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info(
-                "Shipping carrier or transportation mode columns are unavailable."
-            )
+            st.info("Shipping carrier or transportation mode columns are unavailable.")
 
     with col6:
         fig = px.histogram(
@@ -728,9 +636,6 @@ def build_charts(df: pd.DataFrame) -> None:
 
 
 def display_kpis(df: pd.DataFrame) -> None:
-    """
-    Display KPI cards at the top of the dashboard.
-    """
     kpis = compute_kpis(df)
 
     st.subheader("Executive KPI Summary")
@@ -763,9 +668,6 @@ def display_kpis(df: pd.DataFrame) -> None:
 
 
 def display_tables_and_downloads(df: pd.DataFrame) -> None:
-    """
-    Display required dashboard tables and CSV download buttons.
-    """
     st.subheader("SKU-Level Tables and Downloads")
 
     top_skus_table = (
@@ -846,9 +748,6 @@ def display_tables_and_downloads(df: pd.DataFrame) -> None:
 
 
 def display_data_quality_notes(df: pd.DataFrame) -> None:
-    """
-    Display simple data quality notes for transparency.
-    """
     with st.expander("Data Quality and Column Debugging"):
         st.write("Available columns after normalization:")
         st.write(list(df.columns))
@@ -917,6 +816,6 @@ if __name__ == "__main__":
 
 
 # Deployment Instructions:
-# 1. Push app.py, the dataset file, and requirements.txt to a GitHub repository.
+# 1. Push app.py, supply_chain_data.csv, and requirements.txt to a GitHub repository.
 # 2. Deploy the repository using Streamlit Community Cloud or Hugging Face Spaces.
 # 3. Confirm the deployed app loads correctly and all dashboard filters/charts work.
